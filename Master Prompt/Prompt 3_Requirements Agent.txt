@@ -1,0 +1,34 @@
+Generate RequirementAgent.
+
+Responsibilities:
+
+Input:
+Extracted document content.
+
+Output:
+Requirement Specification.
+
+Generate:
+
+1. Project Overview
+2. Actors
+3. Functional Requirements
+4. Non Functional Requirements
+5. Business Rules
+6. Assumptions
+7. Constraints
+8. API Requirements
+
+Use LangChain and OpenAI.
+
+Return structured JSON.
+
+Example:
+
+{
+  "overview":"",
+  "actors":[],
+  "functional_requirements":[]
+}
+
+Generate complete code.

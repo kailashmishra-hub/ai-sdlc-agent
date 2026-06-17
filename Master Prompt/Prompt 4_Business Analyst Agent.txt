@@ -1,0 +1,24 @@
+Generate BusinessAnalystAgent.
+
+Input:
+Requirement Specification JSON
+
+Output:
+
+1. Epics
+2. Features
+3. User Stories
+4. Acceptance Criteria
+
+Format:
+
+As a <role>
+I want <goal>
+So that <benefit>
+
+Acceptance Criteria:
+Given
+When
+Then
+
+Generate complete Python implementation.

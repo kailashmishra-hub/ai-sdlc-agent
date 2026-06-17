@@ -1,0 +1,35 @@
+Phase 4 - Developer Agent
+
+Agent Name:
+DeveloperAgent
+
+Input:
+- Requirement Specification
+- User Stories
+- Acceptance Criteria
+- BDD Scenarios
+- Selected Technology Stack
+
+Responsibilities:
+
+Generate complete application source code.
+
+For Java based projects:
+
+Generate:
+
+- Controllers
+- Services
+- Service Implementations
+- Repositories
+- Entities
+- DTOs
+- Exception Handlers
+- Configuration Classes
+- application.yml
+- pom.xml
+- OpenAPI Specification
+
+Output:
+
+Complete compilable source code.

@@ -1,0 +1,29 @@
+Generate AutomationAgent.
+
+Input:
+BDD Scenarios
+
+Output:
+
+1. Rest Assured automation scripts
+
+Generate:
+
+Project Structure:
+
+src/test/java
+
+api/
+tests/
+utils/
+config/
+
+Generate:
+- BaseTest
+- API Client
+- Request Builder
+- Test Class
+
+Use Java + Rest Assured.
+
+Return project structure and code.

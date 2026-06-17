@@ -1,0 +1,24 @@
+Generate BDDAgent.
+
+Input:
+User Stories
+
+Output:
+BDD scenarios.
+
+Generate:
+
+1. Positive Scenarios
+2. Negative Scenarios
+3. Boundary Scenarios
+4. Error Scenarios
+
+Format:
+
+Feature:
+Scenario:
+Given:
+When:
+Then:
+
+Return markdown.

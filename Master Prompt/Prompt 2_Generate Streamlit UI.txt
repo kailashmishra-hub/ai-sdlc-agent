@@ -1,0 +1,48 @@
+Generate a modern Streamlit UI for the AI SDLC Platform.
+
+Requirements:
+
+Sidebar:
+- OpenAI API Key
+- AstraDB Configuration
+
+Main Area:
+
+Section 1:
+Document Upload
+
+Allow:
+- PDF Upload
+- Image Upload
+- TXT Upload
+
+Section 2:
+Agent Execution
+
+Display:
+- Current Agent
+- Status
+- Progress Bar
+
+Section 3:
+Generated Assets
+
+Tabs:
+
+Requirements
+User Stories
+Acceptance Criteria
+BDD
+Test Cases
+Automation
+
+Section 4:
+Download Center
+
+Download:
+- Markdown
+- PDF
+
+Use Streamlit session state.
+
+Provide complete runnable code.

@@ -1,0 +1,1 @@
+ChromaDB unavailable; stored 6 chunks as text fallback at C:\Users\Kailash\OneDrive\Documents\AI_SDLC\generated_projects\AI_SDLC_Project_20260618_021228\vector_db\document_chunks.txt. Reason: No module named 'chromadb'

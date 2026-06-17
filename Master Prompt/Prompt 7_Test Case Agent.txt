@@ -1,0 +1,19 @@
+Generate TestCaseAgent.
+
+Input:
+BDD scenarios
+
+Output:
+
+Manual test cases.
+
+Columns:
+
+Test Case ID
+Scenario
+Preconditions
+Steps
+Expected Result
+Priority
+
+Return markdown table.

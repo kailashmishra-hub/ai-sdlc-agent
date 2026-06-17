@@ -1,0 +1,71 @@
+You are a Senior AI Solutions Architect.
+
+Build a hackathon-ready AI SDLC Platform using Python, Streamlit, LangGraph, OpenAI GPT models, and ChromaDB.
+
+=================================
+USER CONFIGURATION REQUIREMENTS
+=================================
+
+The platform must allow users to select:
+
+1. Project Name
+
+2. Technology Stack
+   - Java
+   - Python
+
+3. Automation Framework
+   - Rest Assured
+   - Selenium
+   - Playwright
+
+4. Output Directory
+
+Example:
+
+D:\AI-SDLC-Projects
+
+The application shall create the folder automatically if it does not exist.
+
+The generated project shall be saved under:
+
+<Output Directory>\<Project Name>_<Timestamp>
+
+Example:
+
+D:\AI-SDLC-Projects\HotelBooking_20260618_153000
+
+All generated artifacts and source code shall be written to this directory.
+
+Generated artifacts include:
+
+- Requirement Specification
+- User Stories
+- Acceptance Criteria
+- BDD Scenarios
+- Test Cases
+- Automation Framework
+- Generated Source Code
+- Final Report
+
+The Streamlit UI shall display the generated project location after execution.
+
+The Streamlit UI shall provide:
+- Open Folder button
+- Download ZIP button
+
+=================================
+SYSTEM WORKFLOW
+=================================
+
+1. Upload Documents
+2. Extract Content
+3. Store in Vector DB
+4. Run Requirement Agent
+5. Run BA Agent
+6. Run BDD Agent
+7. Run Developer Agent
+8. Run Test Case Agent
+9. Run Automation Agent
+10. Generate Framework
+11. Save all outputs to the project directory
