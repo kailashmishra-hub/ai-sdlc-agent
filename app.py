@@ -1769,6 +1769,28 @@ def render_stage_download(label: str, content: Any) -> None:
     )
 
 
+def file_map_to_zip_bytes(files: dict[str, str], root_folder: str = "automation_repository") -> bytes:
+    buffer = BytesIO()
+    safe_root = safe_filename(root_folder) or "automation_repository"
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for relative, content in sorted(files.items()):
+            safe_path = safe_relative_path(relative).as_posix()
+            archive.writestr(f"{safe_root}/{safe_path}", str(content))
+    return buffer.getvalue()
+
+
+def render_file_map_zip_download(label: str, files: dict[str, str], file_name: str, key: str) -> None:
+    if not files:
+        return
+    st.download_button(
+        label,
+        data=file_map_to_zip_bytes(files),
+        file_name=file_name,
+        mime="application/zip",
+        key=key,
+    )
+
+
 def render_editable_file_map(files: dict[str, str], title: str, key_prefix: str) -> dict[str, str]:
     st.markdown(f"#### {title}")
     paths = list(files.keys())
@@ -2121,6 +2143,13 @@ def render_automation_stage() -> None:
     generated = st.session_state.stage_outputs.get(stage_id)
     if isinstance(generated, dict):
         edited_files = render_editable_file_map(generated, "Review and edit Automation Scripts", "automation-edit")
+        automation_zip_files = {**st.session_state.get("automation_template_files", {}), **edited_files}
+        render_file_map_zip_download(
+            "Download Automation Repository ZIP",
+            automation_zip_files,
+            "automation_repository.zip",
+            "automation-repository-zip-stage",
+        )
         render_stage_download("Automation", edited_files)
         if st.button("Approve Automation Scripts"):
             try:
@@ -2189,6 +2218,14 @@ def main() -> None:
         st.success(f"Generated project location: {st.session_state.project_location}")
     if st.session_state.outputs.get("Automation Repository Path"):
         st.success(f"Automation repository saved at: {st.session_state.outputs['Automation Repository Path']}")
+    automation_source_files = st.session_state.outputs.get("Automation Source Files", {})
+    if isinstance(automation_source_files, dict) and automation_source_files:
+        render_file_map_zip_download(
+            "Download Approved Automation Repository ZIP",
+            automation_source_files,
+            "approved_automation_repository.zip",
+            "automation-repository-zip-final",
+        )
 
     if st.session_state.outputs:
         st.subheader("Final Generated Assets")
