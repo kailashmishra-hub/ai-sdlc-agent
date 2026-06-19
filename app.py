@@ -462,10 +462,58 @@ def acceptance_criteria_stage_agent(approved_requirements: str, additional_conte
     text = call_text(
         "You are an Acceptance Criteria Agent. Return markdown only.",
         f"""
-Generate acceptance criteria from the available source inputs and any additional user instructions.
+Generate a detailed business acceptance criteria document from the available source inputs and any additional user instructions.
 
-Use Gherkin-style Given/When/Then.
-Group criteria by requirement or user story.
+This stage is for the Development team. It must explain the business change that needs to be built, not produce BDD scenarios.
+Do not write BDD Feature/Scenario/Given/When/Then syntax in this stage.
+
+Use this exact markdown structure:
+
+# Business Acceptance Criteria
+
+## Change Summary
+Describe the business change, why it is needed, and the expected business outcome.
+
+## In Scope
+- List the business capabilities, API operations, screens, workflows, or rules included in this change.
+
+## Out of Scope
+- List anything explicitly excluded or not part of this change.
+
+## Business Behavior Details
+### <Capability or Business Process Name>
+- Current behavior:
+- Required new behavior:
+- User/system action:
+- Expected business outcome:
+- Impacted actor or consumer:
+
+## Business Rules and Validations
+| Rule ID | Rule / Validation | Error or Exception Handling | Priority |
+|---|---|---|---|
+| BR-001 | ... | ... | High |
+
+## Data and API Impact
+- Data fields affected:
+- Required fields:
+- Optional fields:
+- API endpoints or operations affected:
+- Request/response expectations:
+
+## Acceptance Conditions
+| AC ID | Acceptance Condition | Build Guidance for Developers | Priority |
+|---|---|---|---|
+| AC-001 | The system must ... | Implement ... | High |
+
+## Assumptions and Open Questions
+- List assumptions and questions that need confirmation.
+
+Rules:
+- Write detailed descriptive business requirements that help developers build the code.
+- Focus on business changes, validations, data/API expectations, and expected outcomes.
+- Each acceptance condition must be specific, testable, and traceable.
+- Use "must", "shall", or "should" statements where appropriate.
+- Do not use Feature:, Scenario:, Given:, When:, Then:, Examples:, or Gherkin code fences.
 Treat workflow constraints and user feedback as mandatory. Do not generate artifacts for anything explicitly excluded.
 
 Optional prior requirements context:
@@ -481,7 +529,16 @@ User feedback:
 {feedback}
 """,
     )
-    return enforce_text_exclusions(text, f"{constraints}\n{feedback}")
+    return remove_bdd_labels_from_acceptance_criteria(enforce_text_exclusions(text, f"{constraints}\n{feedback}"))
+
+
+def remove_bdd_labels_from_acceptance_criteria(text: str) -> str:
+    cleaned_lines = []
+    for line in text.splitlines():
+        if re.match(r"^\s*(Feature|Scenario|Given|When|Then|And|But|Examples):", line, flags=re.IGNORECASE):
+            line = re.sub(r"^\s*(Feature|Scenario|Given|When|Then|And|But|Examples):\s*", "- ", line, flags=re.IGNORECASE)
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
 
 
 def bdd_stage_agent(
@@ -494,10 +551,15 @@ def bdd_stage_agent(
     text = call_text(
         "You are a BDD Scenario Agent. Return markdown only.",
         f"""
-Generate BDD scenarios using approved requirements and approved acceptance criteria.
+Generate executable BDD Gherkin scenarios using the approved acceptance criteria.
 Treat workflow constraints and user feedback as mandatory. Do not generate scenarios for anything explicitly excluded.
 
-Required sections:
+The BDD stage is different from Business Acceptance Criteria:
+- Business Acceptance Criteria describe the business change, rules, validations, and developer build guidance.
+- BDD must convert those approved business conditions into executable Gherkin behavior scenarios.
+- Every scenario should trace to one or more AC IDs when available, for example "# Covers: AC-001".
+
+Required scenario categories:
 1. Positive Scenarios
 2. Negative Scenarios
 3. Boundary Scenarios
@@ -509,6 +571,15 @@ Scenario:
 Given:
 When:
 Then:
+
+Rules:
+- Use proper Gherkin only.
+- Include at least one Feature.
+- Include realistic user/system context in Given.
+- Include specific user/API action in When.
+- Include observable result in Then.
+- Use And/But only as supporting steps.
+- Do not output acceptance criteria tables in this stage.
 
 Approved Requirements:
 {approved_requirements}
@@ -1590,6 +1661,26 @@ def set_progress(agent: str, status: str, progress: int) -> None:
     st.session_state.agent_log.append(f"{agent}: {status}")
 
 
+def is_phase_in_progress() -> bool:
+    status = str(st.session_state.get("status", ""))
+    agent = str(st.session_state.get("current_agent", ""))
+    return "Generating" in status or "Running" in status or agent.endswith("Agent") and "Generating" in status
+
+
+def display_agent_name() -> str:
+    agent = str(st.session_state.current_agent)
+    if is_phase_in_progress():
+        return f"⏳ {agent}"
+    return agent
+
+
+def display_status() -> str:
+    status = str(st.session_state.status)
+    if is_phase_in_progress() and not status.startswith("⏳"):
+        return f"⏳ {status}"
+    return status
+
+
 def sync_current_stage_status() -> None:
     if st.session_state.current_agent not in {"Idle", ""}:
         return
@@ -1648,13 +1739,13 @@ def safe_filename(label: str) -> str:
 STAGES = [
     {
         "id": "acceptance_criteria",
-        "title": "Acceptance Criteria Generation",
-        "description": "Generate and approve Given/When/Then acceptance criteria from the initial inputs.",
+        "title": "Business Acceptance Criteria",
+        "description": "Generate and approve detailed business changes, rules, validations, and build guidance.",
     },
     {
         "id": "bdd",
         "title": "BDD Scenario Generation",
-        "description": "Generate and approve BDD scenarios.",
+        "description": "Convert approved acceptance criteria into executable Gherkin scenarios.",
     },
     {
         "id": "source_code",
@@ -1921,7 +2012,16 @@ def render_acceptance_criteria_stage() -> None:
 
     output = st.session_state.stage_outputs.get(stage_id, "")
     if output:
-        edited = st.text_area("Review and edit Acceptance Criteria", value=output, height=420, key="acceptance_criteria_review")
+        preview_tab, edit_tab = st.tabs(["Formatted Preview", "Edit Content"])
+        with preview_tab:
+            st.markdown(output)
+        with edit_tab:
+            edited = st.text_area(
+                "Review and edit Acceptance Criteria",
+                value=output,
+                height=520,
+                key="acceptance_criteria_review",
+            )
         if st.button("Approve Acceptance Criteria"):
             approve_stage(stage_id, edited)
             st.rerun()
@@ -2186,10 +2286,19 @@ def render_stage_workflow() -> None:
         render_automation_stage()
 
 
+def render_app_header() -> None:
+    header_image = Path("assets/ai_sdlc_header_compact.png")
+    if header_image.exists():
+        left, center, right = st.columns([1, 5, 1])
+        with center:
+            st.image(str(header_image), use_container_width=True)
+
+
 def main() -> None:
     init_state()
     sync_current_stage_status()
     st.title("AI SDLC Platform")
+    render_app_header()
 
     if not secret_or_env("OPENAI_API_KEY"):
         st.session_state.openai_api_key = st.text_input(
@@ -2197,7 +2306,10 @@ def main() -> None:
             type="password",
             value=st.session_state.get("openai_api_key", ""),
             placeholder="Enter your key to generate artifacts",
+            help="OpenAI accepted: after you enter a key, this app will use it only for your current session.",
         )
+        if st.session_state.get("openai_api_key", "").strip():
+            st.success("OpenAI accepted.")
 
     metrics_container = st.container()
 
@@ -2207,8 +2319,8 @@ def main() -> None:
     with metrics_container:
         st.subheader("Agent Execution")
         col1, col2 = st.columns(2)
-        col1.metric("Current Agent", st.session_state.current_agent)
-        col2.metric("Status", st.session_state.status)
+        col1.metric("Current Agent", display_agent_name())
+        col2.metric("Status", display_status())
         if st.session_state.agent_log:
             with st.expander("Execution Log", expanded=True):
                 for item in st.session_state.agent_log:
