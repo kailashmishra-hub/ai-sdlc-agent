@@ -2306,10 +2306,10 @@ def main() -> None:
             type="password",
             value=st.session_state.get("openai_api_key", ""),
             placeholder="Enter your key to generate artifacts",
-            help="OpenAI accepted: after you enter a key, this app will use it only for your current session.",
+            help="Thanks for entering your OpenAI API key. Please proceed on generating the artifacts.",
         )
         if st.session_state.get("openai_api_key", "").strip():
-            st.success("OpenAI accepted.")
+            st.success("Thanks for entering your OpenAI API key. Please proceed on generating the artifacts.")
 
     metrics_container = st.container()
 
