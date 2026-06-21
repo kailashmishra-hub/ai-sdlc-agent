@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime
 from io import BytesIO
@@ -35,6 +36,11 @@ def init_state() -> None:
         "stage_sources": {},
         "automation_template_files": {},
         "automation_repository_path": "",
+        "automation_framework_used": "",
+        "stage_generation_signatures": {},
+        "stage_generation_versions": {},
+        "active_generation_stage": "",
+        "pending_generation_stage": "",
         "workflow_constraints": "",
         "stage_instructions": {},
     }
@@ -1067,6 +1073,7 @@ Return JSON:
     )
     if not all(isinstance(path, str) and isinstance(content, str) for path, content in response.items()):
         raise RuntimeError("Automation Agent response must map file paths to automation code strings.")
+    instruction_text = f"{constraints}\n{feedback}"
     response = ensure_automation_build_files(
         dict(response),
         approved_test_cases,
@@ -1075,9 +1082,10 @@ Return JSON:
         automation_framework,
         constraints,
     )
+    response = enforce_automation_instruction_requirements(dict(response), automation_framework, instruction_text)
     response = ensure_python_automation_files(dict(response), automation_framework)
     response = ensure_node_automation_files(dict(response), automation_framework)
-    validate_automation_framework_output(dict(response), automation_framework)
+    validate_automation_framework_output(dict(response), automation_framework, instruction_text)
     response = ensure_automation_coverage_manifest(approved_test_cases, dict(response))
     missing = missing_automation_test_ids(approved_test_cases, dict(response))
     if missing:
@@ -1099,6 +1107,154 @@ def node_automation_framework(automation_framework: str) -> bool:
 
 def has_file_named(files: dict[str, str], filename: str) -> bool:
     return any(Path(path).name.lower() == filename.lower() for path in files)
+
+
+def find_file_by_name(files: dict[str, str], filename: str) -> str:
+    for path in files:
+        if Path(path).name.lower() == filename.lower():
+            return path
+    return ""
+
+
+def instruction_mentions(text: str, *terms: str) -> bool:
+    lowered = text.lower()
+    return all(term.lower() in lowered for term in terms)
+
+
+def enforce_automation_instruction_requirements(
+    automation_files: dict[str, str],
+    automation_framework: str,
+    instructions: str,
+) -> dict[str, str]:
+    updated = dict(automation_files)
+    framework = automation_framework.strip().lower()
+    pom_path = find_file_by_name(updated, "pom.xml")
+    if pom_path and karate_is_excluded(instructions):
+        updated[pom_path] = remove_karate_entries_from_pom(updated[pom_path])
+    if framework == "rest assured java" and instruction_mentions(instructions, "jackson"):
+        if pom_path:
+            updated[pom_path] = ensure_jackson_dependencies_in_pom(updated[pom_path])
+        else:
+            updated["pom.xml"] = ensure_jackson_dependencies_in_pom(minimal_rest_assured_pom())
+    return updated
+
+
+def karate_is_excluded(instructions: str) -> bool:
+    return instruction_mentions(instructions, "do not use karate") or instruction_mentions(instructions, "no karate")
+
+
+def minimal_rest_assured_pom() -> str:
+    return """<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example.automation</groupId>
+  <artifactId>api-automation</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+  <dependencies>
+    <dependency>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>rest-assured</artifactId>
+      <version>5.5.0</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.11.0</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+"""
+
+
+def ensure_jackson_dependencies_in_pom(pom_xml: str) -> str:
+    root, namespace = parse_pom_xml(pom_xml)
+    if root is None:
+        return pom_xml
+
+    def tag(name: str) -> str:
+        return namespaced_tag(name, namespace)
+
+    dependencies = root.find(tag("dependencies"))
+    if dependencies is None:
+        dependencies = ET.SubElement(root, tag("dependencies"))
+    existing = {
+        (
+            (dependency.findtext(tag("groupId")) or "").strip(),
+            (dependency.findtext(tag("artifactId")) or "").strip(),
+        )
+        for dependency in dependencies.findall(tag("dependency"))
+    }
+    jackson_dependencies = [
+        ("com.fasterxml.jackson.core", "jackson-databind", "2.17.2"),
+        ("com.fasterxml.jackson.core", "jackson-core", "2.17.2"),
+        ("com.fasterxml.jackson.core", "jackson-annotations", "2.17.2"),
+    ]
+    for group_id, artifact_id, version in jackson_dependencies:
+        if (group_id, artifact_id) in existing:
+            continue
+        dependency = ET.SubElement(dependencies, tag("dependency"))
+        ET.SubElement(dependency, tag("groupId")).text = group_id
+        ET.SubElement(dependency, tag("artifactId")).text = artifact_id
+        ET.SubElement(dependency, tag("version")).text = version
+    return ET.tostring(root, encoding="unicode")
+
+
+def remove_karate_entries_from_pom(pom_xml: str) -> str:
+    root, namespace = parse_pom_xml(pom_xml)
+    if root is None:
+        return remove_karate_entries_from_pom_text(pom_xml)
+
+    def tag(name: str) -> str:
+        return namespaced_tag(name, namespace)
+
+    for parent_name, child_name in [("dependencies", "dependency"), ("plugins", "plugin")]:
+        for parent in root.findall(f".//{tag(parent_name)}"):
+            for child in list(parent.findall(tag(child_name))):
+                group_id = (child.findtext(tag("groupId")) or "").lower()
+                artifact_id = (child.findtext(tag("artifactId")) or "").lower()
+                if "karate" in group_id or "karate" in artifact_id:
+                    parent.remove(child)
+    cleaned = ET.tostring(root, encoding="unicode")
+    return remove_karate_entries_from_pom_text(cleaned)
+
+
+def parse_pom_xml(pom_xml: str) -> tuple[ET.Element | None, str]:
+    ET.register_namespace("", "http://maven.apache.org/POM/4.0.0")
+    try:
+        root = ET.fromstring(pom_xml)
+    except ET.ParseError:
+        return None, ""
+    namespace_match = re.match(r"\{(.+)\}", root.tag)
+    namespace = namespace_match.group(1) if namespace_match else ""
+    return root, namespace
+
+
+def namespaced_tag(name: str, namespace: str) -> str:
+    return f"{{{namespace}}}{name}" if namespace else name
+
+
+def remove_karate_entries_from_pom_text(pom_xml: str) -> str:
+    cleaned = re.sub(
+        r"\s*<dependency>\s*(?:(?!</dependency>).)*karate(?:(?!</dependency>).)*</dependency>",
+        "",
+        pom_xml,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"\s*<plugin>\s*(?:(?!</plugin>).)*karate(?:(?!</plugin>).)*</plugin>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return cleaned
 
 
 def ensure_automation_build_files(
@@ -1202,15 +1358,28 @@ def ensure_node_automation_files(automation_files: dict[str, str], automation_fr
     return updated
 
 
-def validate_automation_framework_output(automation_files: dict[str, str], automation_framework: str) -> None:
+def validate_automation_framework_output(
+    automation_files: dict[str, str],
+    automation_framework: str,
+    instructions: str = "",
+) -> None:
     framework = automation_framework.strip().lower()
     combined = "\n".join(automation_files.values()).lower()
     paths = [path.lower() for path in automation_files]
+    if karate_is_excluded(instructions):
+        if "karate" in combined or any("karate" in path for path in paths):
+            raise RuntimeError("Automation instructions exclude Karate, but generated files include Karate references.")
+    if instruction_mentions(instructions, "api based") or instruction_mentions(instructions, "not a ui"):
+        ui_markers = ["selenium", "playwright", "cypress", "webdriver", "page object", "pageobject", "locator("]
+        if any(marker in combined for marker in ui_markers):
+            raise RuntimeError("Automation instructions describe an API project, but generated files include UI automation markers.")
     if java_maven_framework(automation_framework) and not has_file_named(automation_files, "pom.xml"):
         raise RuntimeError(f"{automation_framework} automation requires a pom.xml file.")
     if framework == "rest assured java":
         if "rest-assured" not in combined and "io.restassured" not in combined:
             raise RuntimeError("REST Assured Java automation must include Rest Assured dependencies/imports.")
+        if instruction_mentions(instructions, "jackson") and "jackson" not in combined:
+            raise RuntimeError("Automation instructions require Jackson libraries in pom.xml.")
         if not any(path.endswith(".java") for path in paths):
             raise RuntimeError("REST Assured Java automation must generate Java test files.")
         if any(path.endswith(".py") for path in paths):
@@ -1791,6 +1960,11 @@ def stage_progress() -> None:
         st.session_state.agent_log = []
         st.session_state.automation_template_files = {}
         st.session_state.automation_repository_path = ""
+        st.session_state.automation_framework_used = ""
+        st.session_state.stage_generation_signatures = {}
+        st.session_state.stage_generation_versions = {}
+        st.session_state.active_generation_stage = ""
+        st.session_state.pending_generation_stage = ""
         st.session_state.workflow_constraints = ""
         st.session_state.stage_instructions = {}
         set_progress("Idle", "Workflow reset", 0)
@@ -1924,13 +2098,131 @@ def file_language(path: str) -> str:
 
 
 def record_stage_instruction(stage_id: str, instruction: str) -> None:
-    instruction = instruction.strip()
-    if not instruction:
-        return
+    instruction = normalize_instruction_text(instruction)
     instructions = dict(st.session_state.get("stage_instructions", {}))
-    instructions[stage_id] = instruction
+    if instruction:
+        existing = instructions.get(stage_id, "").strip()
+        instructions[stage_id] = merge_instruction_text(existing, instruction)
     st.session_state.stage_instructions = instructions
     st.session_state.workflow_constraints = combined_workflow_instructions()
+
+
+def normalize_instruction_text(text: str) -> str:
+    return "\n".join(line.strip() for line in str(text or "").splitlines() if line.strip())
+
+
+def merge_instruction_text(existing: str, new_instruction: str) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for source in [existing, new_instruction]:
+        for line in normalize_instruction_text(source).splitlines():
+            key = line.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def effective_stage_instruction(stage_id: str, current_feedback: str = "") -> str:
+    existing = st.session_state.get("stage_instructions", {}).get(stage_id, "").strip()
+    return merge_instruction_text(existing, current_feedback)
+
+
+def stage_generation_signature(stage_id: str, instruction: str, **options: str) -> str:
+    payload = {
+        "stage_id": stage_id,
+        "instruction": normalize_instruction_text(instruction),
+        "options": {key: str(value).strip() for key, value in sorted(options.items())},
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+def record_stage_generation(stage_id: str, instruction: str, **options: str) -> None:
+    record_stage_instruction(stage_id, instruction)
+    effective_instruction = effective_stage_instruction(stage_id)
+    signatures = dict(st.session_state.get("stage_generation_signatures", {}))
+    signatures[stage_id] = stage_generation_signature(stage_id, effective_instruction, **options)
+    st.session_state.stage_generation_signatures = signatures
+    versions = dict(st.session_state.get("stage_generation_versions", {}))
+    versions[stage_id] = int(versions.get(stage_id, 0)) + 1
+    st.session_state.stage_generation_versions = versions
+
+
+def stage_generation_version(stage_id: str) -> int:
+    return int(st.session_state.get("stage_generation_versions", {}).get(stage_id, 0))
+
+
+def stage_output_is_stale(stage_id: str, instruction: str, **options: str) -> bool:
+    if not has_stage_output(stage_id):
+        return False
+    signatures = st.session_state.get("stage_generation_signatures", {})
+    previous_signature = signatures.get(stage_id, "")
+    current_signature = stage_generation_signature(stage_id, instruction, **options)
+    return previous_signature != current_signature
+
+
+def render_stale_stage_warning(stage_label: str, stale: bool) -> None:
+    if stale:
+        st.warning(f"{stage_label} feedback or instructions changed after generation. Regenerate before approving.")
+
+
+def block_stale_stage_approval(stage_label: str, stale: bool) -> bool:
+    if stale:
+        st.error(f"Current {stage_label} instructions were not used for this output. Regenerate first.")
+        return True
+    return False
+
+
+def is_generation_in_progress() -> bool:
+    return bool(str(st.session_state.get("active_generation_stage", "")).strip())
+
+
+def is_stage_generation_in_progress(stage_id: str) -> bool:
+    return st.session_state.get("active_generation_stage", "") == stage_id
+
+
+def begin_stage_generation(stage_id: str) -> bool:
+    active_stage = str(st.session_state.get("active_generation_stage", "")).strip()
+    if active_stage and active_stage != stage_id:
+        st.warning("Another generation is already in progress. Please wait for it to finish.")
+        return False
+    if active_stage == stage_id:
+        st.warning("Generation is already in progress for this stage.")
+        return False
+    st.session_state.active_generation_stage = stage_id
+    return True
+
+
+def request_stage_generation(stage_id: str) -> None:
+    active_stage = str(st.session_state.get("active_generation_stage", "")).strip()
+    if active_stage:
+        return
+    st.session_state.active_generation_stage = stage_id
+    st.session_state.pending_generation_stage = stage_id
+
+
+def consume_stage_generation_request(stage_id: str) -> bool:
+    return st.session_state.get("pending_generation_stage", "") == stage_id
+
+
+def finish_stage_generation(stage_id: str) -> None:
+    if st.session_state.get("active_generation_stage", "") == stage_id:
+        st.session_state.active_generation_stage = ""
+    if st.session_state.get("pending_generation_stage", "") == stage_id:
+        st.session_state.pending_generation_stage = ""
+
+
+def render_generation_progress_notice(stage_label: str, stage_id: str) -> None:
+    if is_stage_generation_in_progress(stage_id):
+        st.info(f"{stage_label} generation is in progress. Please wait.")
+
+
+def render_stage_instruction_memory(stage_id: str) -> None:
+    instruction = st.session_state.get("stage_instructions", {}).get(stage_id, "").strip()
+    if instruction:
+        with st.expander("Remembered instructions for this stage", expanded=False):
+            st.markdown(instruction.replace("\n", "\n\n"))
 
 
 def combined_workflow_instructions(extra_instruction: str = "") -> str:
@@ -1991,27 +2283,46 @@ def render_acceptance_criteria_stage() -> None:
         key="acceptance_criteria_uploads",
     )
     feedback = st.text_area("Acceptance criteria feedback or instructions", key="acceptance_criteria_feedback")
-    if st.button("Generate Acceptance Criteria", type="primary"):
+    render_stage_instruction_memory(stage_id)
+    output = st.session_state.stage_outputs.get(stage_id, "")
+    effective_feedback = effective_stage_instruction(stage_id, feedback)
+    output_is_stale = stage_output_is_stale(stage_id, effective_feedback)
+    render_stale_stage_warning("Acceptance Criteria", output_is_stale)
+    render_generation_progress_notice("Acceptance Criteria", stage_id)
+    generate_label = "Regenerate Acceptance Criteria" if output else "Generate Acceptance Criteria"
+    st.button(
+        generate_label,
+        type="primary",
+        disabled=is_generation_in_progress(),
+        on_click=request_stage_generation,
+        args=(stage_id,),
+    )
+    if consume_stage_generation_request(stage_id):
         try:
             additional, sources = extract_optional_uploads(uploads or [])
             if not additional and not feedback.strip():
                 st.error("Upload a document or provide acceptance criteria instructions.")
                 return
             st.session_state.stage_sources[stage_id] = sources
-            record_stage_instruction(stage_id, feedback)
+            record_stage_generation(stage_id, feedback)
+            effective_feedback = effective_stage_instruction(stage_id)
             set_progress("Acceptance Criteria Agent", "Generating acceptance criteria for review", 32)
             st.session_state.stage_outputs[stage_id] = acceptance_criteria_stage_agent(
                 "",
                 additional,
-                feedback,
+                effective_feedback,
                 combined_workflow_instructions(),
             )
         except Exception as exc:
             st.error(str(exc))
             set_progress("Failed", str(exc), st.session_state.progress)
+        finally:
+            finish_stage_generation(stage_id)
+            st.rerun()
 
     output = st.session_state.stage_outputs.get(stage_id, "")
     if output:
+        version = stage_generation_version(stage_id)
         preview_tab, edit_tab = st.tabs(["Formatted Preview", "Edit Content"])
         with preview_tab:
             st.markdown(output)
@@ -2020,9 +2331,11 @@ def render_acceptance_criteria_stage() -> None:
                 "Review and edit Acceptance Criteria",
                 value=output,
                 height=520,
-                key="acceptance_criteria_review",
+                key=f"acceptance_criteria_review_{version}",
             )
         if st.button("Approve Acceptance Criteria"):
+            if block_stale_stage_approval("Acceptance Criteria", output_is_stale):
+                return
             approve_stage(stage_id, edited)
             st.rerun()
         render_stage_download("Acceptance Criteria", edited)
@@ -2040,28 +2353,49 @@ def render_bdd_stage() -> None:
         key="bdd_uploads",
     )
     feedback = st.text_area("BDD feedback or scenario instructions", key="bdd_feedback")
-    if st.button("Generate BDD Scenarios", type="primary"):
+    render_stage_instruction_memory(stage_id)
+    output = st.session_state.stage_outputs.get(stage_id, "")
+    effective_feedback = effective_stage_instruction(stage_id, feedback)
+    output_is_stale = stage_output_is_stale(stage_id, effective_feedback)
+    render_stale_stage_warning("BDD Scenarios", output_is_stale)
+    render_generation_progress_notice("BDD Scenarios", stage_id)
+    generate_label = "Regenerate BDD Scenarios" if output else "Generate BDD Scenarios"
+    st.button(
+        generate_label,
+        type="primary",
+        disabled=is_generation_in_progress(),
+        on_click=request_stage_generation,
+        args=(stage_id,),
+    )
+    if consume_stage_generation_request(stage_id):
         try:
             additional, sources = extract_optional_uploads(uploads or [])
             st.session_state.stage_sources[stage_id] = sources
-            record_stage_instruction(stage_id, feedback)
+            record_stage_generation(stage_id, feedback)
+            effective_feedback = effective_stage_instruction(stage_id)
             set_progress("BDD Agent", "Generating BDD scenarios for review", 48)
             st.session_state.stage_outputs[stage_id] = bdd_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
                 st.session_state.stage_outputs["acceptance_criteria"],
                 additional,
-                feedback,
+                effective_feedback,
                 combined_workflow_instructions(),
             )
         except Exception as exc:
             st.error(str(exc))
             set_progress("Failed", str(exc), st.session_state.progress)
+        finally:
+            finish_stage_generation(stage_id)
+            st.rerun()
 
     output = st.session_state.stage_outputs.get(stage_id, "")
     if output:
+        version = stage_generation_version(stage_id)
         st.code(output, language="gherkin")
-        edited = st.text_area("Review and edit BDD Scenarios", value=output, height=420, key="bdd_review")
+        edited = st.text_area("Review and edit BDD Scenarios", value=output, height=420, key=f"bdd_review_{version}")
         if st.button("Approve BDD Scenarios"):
+            if block_stale_stage_approval("BDD Scenario", output_is_stale):
+                return
             approve_stage(stage_id, edited)
             st.rerun()
         render_stage_download("BDD Scenarios", edited)
@@ -2079,19 +2413,34 @@ def render_source_code_stage() -> None:
         key="source_code_uploads",
     )
     feedback = st.text_area("Source code feedback or implementation instructions", key="source_code_feedback")
+    render_stage_instruction_memory(stage_id)
     technology_stack = st.selectbox("Technology Stack", ["Java Spring Boot", "Java", "Python", "Node.js", ".NET"], key="technology_stack")
-    if st.button("Generate Source Code", type="primary"):
+    generated = st.session_state.stage_outputs.get(stage_id)
+    effective_feedback = effective_stage_instruction(stage_id, feedback)
+    output_is_stale = stage_output_is_stale(stage_id, effective_feedback, technology_stack=technology_stack)
+    render_stale_stage_warning("Source Code", output_is_stale)
+    render_generation_progress_notice("Source Code", stage_id)
+    generate_label = "Regenerate Source Code" if isinstance(generated, dict) else "Generate Source Code"
+    st.button(
+        generate_label,
+        type="primary",
+        disabled=is_generation_in_progress(),
+        on_click=request_stage_generation,
+        args=(stage_id,),
+    )
+    if consume_stage_generation_request(stage_id):
         try:
             additional, sources = extract_optional_uploads(uploads or [])
             st.session_state.stage_sources[stage_id] = sources
-            record_stage_instruction(stage_id, feedback)
+            record_stage_generation(stage_id, feedback, technology_stack=technology_stack)
+            effective_feedback = effective_stage_instruction(stage_id)
             set_progress("Source Code Agent", "Generating source code for review", 64)
             generated = source_code_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
                 st.session_state.stage_outputs["acceptance_criteria"],
                 st.session_state.stage_outputs["bdd"],
                 additional,
-                feedback,
+                effective_feedback,
                 technology_stack,
                 combined_workflow_instructions(),
             )
@@ -2099,12 +2448,18 @@ def render_source_code_stage() -> None:
         except Exception as exc:
             st.error(str(exc))
             set_progress("Failed", str(exc), st.session_state.progress)
+        finally:
+            finish_stage_generation(stage_id)
+            st.rerun()
 
     generated = st.session_state.stage_outputs.get(stage_id)
     if isinstance(generated, dict):
-        edited_files = render_editable_file_map(generated, "Review and edit Source Code", "source-code-edit")
+        version = stage_generation_version(stage_id)
+        edited_files = render_editable_file_map(generated, "Review and edit Source Code", f"source-code-edit-{version}")
         render_stage_download("Source Code", edited_files)
         if st.button("Approve Source Code"):
+            if block_stale_stage_approval("Source Code", output_is_stale):
+                return
             approve_stage(stage_id, edited_files)
             st.rerun()
 
@@ -2121,11 +2476,26 @@ def render_test_case_stage() -> None:
         key="test_case_uploads",
     )
     feedback = st.text_area("Test case feedback or instructions", key="test_case_feedback")
-    if st.button("Generate Test Cases", type="primary"):
+    render_stage_instruction_memory(stage_id)
+    output = st.session_state.stage_outputs.get(stage_id, "")
+    effective_feedback = effective_stage_instruction(stage_id, feedback)
+    output_is_stale = stage_output_is_stale(stage_id, effective_feedback)
+    render_stale_stage_warning("Test Cases", output_is_stale)
+    render_generation_progress_notice("Test Cases", stage_id)
+    generate_label = "Regenerate Test Cases" if output else "Generate Test Cases"
+    st.button(
+        generate_label,
+        type="primary",
+        disabled=is_generation_in_progress(),
+        on_click=request_stage_generation,
+        args=(stage_id,),
+    )
+    if consume_stage_generation_request(stage_id):
         try:
             additional, sources = extract_optional_uploads(uploads or [])
             st.session_state.stage_sources[stage_id] = sources
-            record_stage_instruction(stage_id, feedback)
+            record_stage_generation(stage_id, feedback)
+            effective_feedback = effective_stage_instruction(stage_id)
             set_progress("Test Case Agent", "Generating test cases for review", 80)
             source_files = st.session_state.stage_outputs.get("source_code", {})
             source_summary = (
@@ -2139,15 +2509,19 @@ def render_test_case_stage() -> None:
                 st.session_state.stage_outputs["bdd"],
                 source_summary[:12000],
                 additional,
-                feedback,
+                effective_feedback,
                 combined_workflow_instructions(),
             )
         except Exception as exc:
             st.error(str(exc))
             set_progress("Failed", str(exc), st.session_state.progress)
+        finally:
+            finish_stage_generation(stage_id)
+            st.rerun()
 
     output = st.session_state.stage_outputs.get(stage_id, "")
     if output:
+        version = stage_generation_version(stage_id)
         rows = markdown_test_cases_to_rows(output)
         if rows:
             edited_rows = st.data_editor(
@@ -2156,7 +2530,7 @@ def render_test_case_stage() -> None:
                 num_rows="dynamic",
                 use_container_width=True,
                 hide_index=True,
-                key="test_case_grid",
+                key=f"test_case_grid_{version}",
                 column_config={
                     "Test Case ID": st.column_config.TextColumn("Test Case ID", width="small"),
                     "Scenario": st.column_config.TextColumn("Scenario", width="medium"),
@@ -2169,8 +2543,10 @@ def render_test_case_stage() -> None:
             edited = rows_to_test_case_markdown(edited_rows)
         else:
             st.warning("The generated test cases could not be parsed into a table. Use the raw editor below.")
-            edited = st.text_area("Review and edit Test Cases", value=output, height=420, key="test_case_review")
+            edited = st.text_area("Review and edit Test Cases", value=output, height=420, key=f"test_case_review_{version}")
         if st.button("Approve Test Cases"):
+            if block_stale_stage_approval("Test Case", output_is_stale):
+                return
             approve_stage(stage_id, edited)
             st.rerun()
         render_stage_download("Test Cases", edited)
@@ -2192,6 +2568,7 @@ def render_automation_stage() -> None:
         help="Upload a ZIP when you want generated assets to follow an existing repository structure.",
     )
     feedback = st.text_area("Automation feedback or instructions", key="automation_feedback")
+    render_stage_instruction_memory(stage_id)
     automation_framework = st.selectbox(
         "Automation Framework / Technology",
         [
@@ -2214,13 +2591,28 @@ def render_automation_stage() -> None:
         key="automation_repository_path",
         help="Generated repository files are saved here. Use a path inside this workspace.",
     )
-    if st.button("Generate Automation Scripts", type="primary"):
+    generated = st.session_state.stage_outputs.get(stage_id)
+    effective_feedback = effective_stage_instruction(stage_id, feedback)
+    output_is_stale = stage_output_is_stale(stage_id, effective_feedback, automation_framework=automation_framework)
+    render_stale_stage_warning("Automation", output_is_stale)
+    render_generation_progress_notice("Automation", stage_id)
+    generate_label = "Regenerate Automation Scripts" if isinstance(generated, dict) else "Generate Automation Scripts"
+    st.button(
+        generate_label,
+        type="primary",
+        disabled=is_generation_in_progress(),
+        on_click=request_stage_generation,
+        args=(stage_id,),
+    )
+    if consume_stage_generation_request(stage_id):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 template_summary, sources, template_files = extract_automation_template_uploads(uploads or [], Path(tmp))
             st.session_state.stage_sources[stage_id] = sources
             st.session_state.automation_template_files = template_files
-            record_stage_instruction(stage_id, feedback)
+            st.session_state.automation_framework_used = automation_framework
+            record_stage_generation(stage_id, feedback, automation_framework=automation_framework)
+            effective_feedback = effective_stage_instruction(stage_id)
             set_progress("Automation Agent", "Generating automation scripts for each test case", 94)
             automation_files = automation_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
@@ -2230,7 +2622,7 @@ def render_automation_stage() -> None:
                 st.session_state.stage_outputs["test_cases"],
                 "",
                 template_summary,
-                feedback,
+                effective_feedback,
                 automation_framework,
                 combined_workflow_instructions(),
             )
@@ -2239,10 +2631,14 @@ def render_automation_stage() -> None:
         except Exception as exc:
             st.error(str(exc))
             set_progress("Failed", str(exc), st.session_state.progress)
+        finally:
+            finish_stage_generation(stage_id)
+            st.rerun()
 
     generated = st.session_state.stage_outputs.get(stage_id)
     if isinstance(generated, dict):
-        edited_files = render_editable_file_map(generated, "Review and edit Automation Scripts", "automation-edit")
+        version = stage_generation_version(stage_id)
+        edited_files = render_editable_file_map(generated, "Review and edit Automation Scripts", f"automation-edit-{version}")
         automation_zip_files = {**st.session_state.get("automation_template_files", {}), **edited_files}
         render_file_map_zip_download(
             "Download Automation Repository ZIP",
@@ -2253,6 +2649,8 @@ def render_automation_stage() -> None:
         render_stage_download("Automation", edited_files)
         if st.button("Approve Automation Scripts"):
             try:
+                if block_stale_stage_approval("Automation", output_is_stale):
+                    return
                 st.session_state.stage_approved[stage_id] = True
                 finalize_approved_workflow(
                     edited_files,
