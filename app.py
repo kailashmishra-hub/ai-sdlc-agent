@@ -116,6 +116,8 @@ def extract_uploaded_files(uploaded_files: list, temp_dir: Path) -> tuple[str, l
             parts.append(path.read_text(encoding="utf-8", errors="ignore"))
         elif suffix == ".pdf":
             parts.append(extract_pdf(path))
+        elif suffix == ".docx":
+            parts.append(extract_docx(path))
         elif suffix in {".png", ".jpg", ".jpeg"}:
             parts.append(describe_image(path))
     text = "\n\n".join(part.strip() for part in parts if part.strip())
@@ -183,6 +185,8 @@ def extract_automation_template_uploads(uploaded_files: list, temp_dir: Path) ->
             parts.append(f"Supporting template document: {uploaded.name}\n{content[:4000]}")
         elif suffix == ".pdf":
             parts.append(extract_pdf(path))
+        elif suffix == ".docx":
+            parts.append(extract_docx(path))
         elif suffix in {".png", ".jpg", ".jpeg"}:
             parts.append(describe_image(path))
     return "\n\n".join(part.strip() for part in parts if part.strip()), sources, template_files
@@ -193,6 +197,23 @@ def extract_pdf(path: Path) -> str:
 
     reader = PdfReader(str(path))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def extract_docx(path: Path) -> str:
+    from docx import Document
+
+    document = Document(str(path))
+    parts: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            parts.append(text)
+    for table in document.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n".join(parts)
 
 
 def describe_image(path: Path) -> str:
@@ -1939,12 +1960,10 @@ def stage_progress() -> None:
     for index, stage in enumerate(STAGES):
         approved = st.session_state.stage_approved.get(stage["id"], False)
         current = index == st.session_state.stage_index
-        accessible = is_stage_accessible(index)
-        status = "Approved" if approved else "Current" if current else "Open" if accessible else "Locked"
-        disabled = not accessible
+        status = "Approved" if approved else "Current" if current else "Open"
         with cols[index]:
             render_stage_badge(stage["title"], status)
-            if st.button("Go", disabled=disabled, key=f"stage-nav-{stage['id']}"):
+            if st.button("Go", key=f"stage-nav-{stage['id']}"):
                 st.session_state.stage_index = index
                 st.session_state.current_agent = f"{stage['title']} Agent"
                 st.session_state.status = "Approved" if approved else "In review" if has_stage_output(stage["id"]) else "Ready for input"
@@ -2004,14 +2023,7 @@ def has_stage_output(stage_id: str) -> bool:
 
 
 def is_stage_accessible(index: int) -> bool:
-    if index <= st.session_state.stage_index:
-        return True
-    stage_id = STAGES[index]["id"]
-    bdd_generated = has_stage_output("bdd")
-    if bdd_generated and stage_id in {"source_code", "test_cases", "automation"}:
-        return True
-    previous_stage = STAGES[index - 1]["id"] if index > 0 else ""
-    return bool(previous_stage and st.session_state.stage_approved.get(previous_stage))
+    return 0 <= index < len(STAGES)
 
 
 def extract_optional_uploads(uploaded_files: list) -> tuple[str, list[str]]:
@@ -2044,12 +2056,12 @@ def file_map_to_zip_bytes(files: dict[str, str], root_folder: str = "automation_
     return buffer.getvalue()
 
 
-def render_file_map_zip_download(label: str, files: dict[str, str], file_name: str, key: str) -> None:
+def render_file_map_zip_download(label: str, files: dict[str, str], file_name: str, key: str, root_folder: str = "automation_repository") -> None:
     if not files:
         return
     st.download_button(
         label,
-        data=file_map_to_zip_bytes(files),
+        data=file_map_to_zip_bytes(files, root_folder),
         file_name=file_name,
         mime="application/zip",
         key=key,
@@ -2242,11 +2254,7 @@ def approve_stage(stage_id: str, edited_value: Any) -> None:
         edited_value = enforce_text_exclusions(edited_value, combined_workflow_instructions())
     st.session_state.stage_outputs[stage_id] = edited_value
     st.session_state.stage_approved[stage_id] = True
-    current = st.session_state.stage_index
-    if current < len(STAGES) - 1:
-        st.session_state.stage_index = current + 1
-    percent = int(((st.session_state.stage_index + 1) / len(STAGES)) * 100)
-    set_progress("Stage Approval", f"Approved {stage_id}", min(100, percent))
+    set_progress("Stage Approval", f"Approved {stage_id}", 0)
 
 
 def finalize_approved_workflow(
@@ -2258,10 +2266,10 @@ def finalize_approved_workflow(
     saved_repo_dir = save_automation_repository(automation_repo_path, template_files, automation_files)
     merged_automation_files = {**template_files, **automation_files}
     outputs = {
-        "Acceptance Criteria": st.session_state.stage_outputs["acceptance_criteria"],
-        "BDD Scenarios": st.session_state.stage_outputs["bdd"],
+        "Acceptance Criteria": st.session_state.stage_outputs.get("acceptance_criteria", "Acceptance Criteria were not generated in this workflow."),
+        "BDD Scenarios": st.session_state.stage_outputs.get("bdd", "BDD Scenarios were not generated in this workflow."),
         "Generated Source Code": st.session_state.stage_outputs.get("source_code", "Source code was not generated in this workflow."),
-        "Test Cases": st.session_state.stage_outputs["test_cases"],
+        "Test Cases": st.session_state.stage_outputs.get("test_cases", "Test Cases were not generated in this workflow."),
         "Automation Framework": source_files_markdown(merged_automation_files, "Automation Framework"),
         "Automation Source Files": merged_automation_files,
         "Automation Repository Path": str(saved_repo_dir),
@@ -2278,7 +2286,7 @@ def render_acceptance_criteria_stage() -> None:
     stage_id = "acceptance_criteria"
     uploads = st.file_uploader(
         "Upload initial input documents for acceptance criteria",
-        type=["pdf", "txt", "png", "jpg", "jpeg"],
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="acceptance_criteria_uploads",
     )
@@ -2343,12 +2351,9 @@ def render_acceptance_criteria_stage() -> None:
 
 def render_bdd_stage() -> None:
     stage_id = "bdd"
-    if not st.session_state.stage_approved.get("acceptance_criteria"):
-        st.info("Approve Acceptance Criteria before generating BDD scenarios.")
-        return
     uploads = st.file_uploader(
         "Upload supporting documents for BDD scenarios",
-        type=["pdf", "txt", "png", "jpg", "jpeg"],
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="bdd_uploads",
     )
@@ -2376,7 +2381,7 @@ def render_bdd_stage() -> None:
             set_progress("BDD Agent", "Generating BDD scenarios for review", 48)
             st.session_state.stage_outputs[stage_id] = bdd_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
-                st.session_state.stage_outputs["acceptance_criteria"],
+                st.session_state.stage_outputs.get("acceptance_criteria", ""),
                 additional,
                 effective_feedback,
                 combined_workflow_instructions(),
@@ -2403,12 +2408,9 @@ def render_bdd_stage() -> None:
 
 def render_source_code_stage() -> None:
     stage_id = "source_code"
-    if not has_stage_output("bdd"):
-        st.info("Generate BDD Scenarios before starting Source Code Generation.")
-        return
     uploads = st.file_uploader(
         "Upload coding standards, API specs, implementation notes, or extra technical documents",
-        type=["pdf", "txt", "png", "jpg", "jpeg"],
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="source_code_uploads",
     )
@@ -2437,8 +2439,8 @@ def render_source_code_stage() -> None:
             set_progress("Source Code Agent", "Generating source code for review", 64)
             generated = source_code_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
-                st.session_state.stage_outputs["acceptance_criteria"],
-                st.session_state.stage_outputs["bdd"],
+                st.session_state.stage_outputs.get("acceptance_criteria", ""),
+                st.session_state.stage_outputs.get("bdd", ""),
                 additional,
                 effective_feedback,
                 technology_stack,
@@ -2456,6 +2458,13 @@ def render_source_code_stage() -> None:
     if isinstance(generated, dict):
         version = stage_generation_version(stage_id)
         edited_files = render_editable_file_map(generated, "Review and edit Source Code", f"source-code-edit-{version}")
+        render_file_map_zip_download(
+            "Download Source Code ZIP",
+            edited_files,
+            "source_code_repository.zip",
+            "source-code-zip-stage",
+            "source_code_repository",
+        )
         render_stage_download("Source Code", edited_files)
         if st.button("Approve Source Code"):
             if block_stale_stage_approval("Source Code", output_is_stale):
@@ -2466,12 +2475,9 @@ def render_source_code_stage() -> None:
 
 def render_test_case_stage() -> None:
     stage_id = "test_cases"
-    if not has_stage_output("bdd"):
-        st.info("Generate BDD Scenarios before generating Test Cases.")
-        return
     uploads = st.file_uploader(
         "Upload supporting documents for test case generation",
-        type=["pdf", "txt", "png", "jpg", "jpeg"],
+        type=["pdf", "docx", "txt", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="test_case_uploads",
     )
@@ -2501,12 +2507,12 @@ def render_test_case_stage() -> None:
             source_summary = (
                 source_files_markdown(source_files, "Generated Source Code")
                 if isinstance(source_files, dict) and source_files
-                else "Source code has not been generated. Generate test cases from approved requirements, acceptance criteria, and BDD only."
+                else "Source code has not been generated. Generate test cases from the available approved artifacts, uploaded documents, and instructions."
             )
             st.session_state.stage_outputs[stage_id] = test_case_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
-                st.session_state.stage_outputs["acceptance_criteria"],
-                st.session_state.stage_outputs["bdd"],
+                st.session_state.stage_outputs.get("acceptance_criteria", ""),
+                st.session_state.stage_outputs.get("bdd", ""),
                 source_summary[:12000],
                 additional,
                 effective_feedback,
@@ -2554,15 +2560,9 @@ def render_test_case_stage() -> None:
 
 def render_automation_stage() -> None:
     stage_id = "automation"
-    if not has_stage_output("test_cases"):
-        st.info("Generate and approve Test Cases before generating Automation Scripts.")
-        return
-    if not st.session_state.stage_approved.get("test_cases"):
-        st.info("Approve the current Test Cases table before generating Automation Scripts.")
-        return
     uploads = st.file_uploader(
         "Upload automation framework template ZIP, coding standards, examples, or execution notes",
-        type=["zip", "pdf", "txt", "md", "json", "yaml", "yml", "xml", "properties", "java", "py", "js", "ts", "feature", "png", "jpg", "jpeg"],
+        type=["zip", "pdf", "docx", "txt", "md", "json", "yaml", "yml", "xml", "properties", "java", "py", "js", "ts", "feature", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key="automation_uploads",
         help="Upload a ZIP when you want generated assets to follow an existing repository structure.",
@@ -2614,12 +2614,15 @@ def render_automation_stage() -> None:
             record_stage_generation(stage_id, feedback, automation_framework=automation_framework)
             effective_feedback = effective_stage_instruction(stage_id)
             set_progress("Automation Agent", "Generating automation scripts for each test case", 94)
+            available_test_cases = st.session_state.stage_outputs.get("test_cases", "")
+            if not str(available_test_cases).strip():
+                available_test_cases = "No approved manual test case table is available. Generate automation from uploaded documents, template context, and user instructions."
             automation_files = automation_stage_agent(
                 st.session_state.stage_outputs.get("requirements", ""),
-                st.session_state.stage_outputs["acceptance_criteria"],
-                st.session_state.stage_outputs["bdd"],
+                st.session_state.stage_outputs.get("acceptance_criteria", ""),
+                st.session_state.stage_outputs.get("bdd", ""),
                 st.session_state.stage_outputs.get("source_code", {}),
-                st.session_state.stage_outputs["test_cases"],
+                str(available_test_cases),
                 "",
                 template_summary,
                 effective_feedback,
